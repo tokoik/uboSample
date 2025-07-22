@@ -1,0 +1,189 @@
+#version 430 core
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// 背景色
+uniform vec4 background = vec4(0.1, 0.2, 0.3, 0.0);
+
+// 画像を出力する Image Unit
+layout (rgba8) writeonly restrict uniform image2D image;
+
+// イメージのサイズ
+vec2 size = vec2(imageSize(image));
+
+// イメージの中心
+vec2 center = size * 0.5;
+
+// 視点
+layout (std140, binding = 1) uniform Camera
+{
+  // スクリーンの原点
+  vec3 origin;
+
+  // スクリーンの右方向
+  vec3 right;
+
+  // スクリーンの上方向
+  vec3 up;
+
+  // 視点位置
+  vec3 position;
+};
+
+// 光源
+struct Light
+{
+  // 環境光成分
+  vec4 ambient;
+
+  // 拡散反射光成分
+  vec4 diffuse;
+
+  // 鏡面反射光成分
+  vec4 specular;
+
+  // 位置
+  vec3 position;
+};
+
+// 光源データ
+layout (std140, binding = 2) uniform Lights
+{
+  Light light[2];
+};
+
+// 光源データの数
+uniform int lightCount = 1;
+
+// 材質
+struct Material
+{
+  // 環境光の反射係数
+  vec4 ambient;
+
+  // 拡散反射係数
+  vec4 diffuse;
+
+  // 鏡面反射係数
+  vec4 specular;
+
+  // 輝き係数
+  float shininess;
+};
+
+// 材質データ
+layout (std140, binding = 3) uniform Materials
+{
+  Material material[2];
+};
+
+// 球
+struct Sphere
+{
+  // 中心位置
+  vec3 center;
+
+  // 半径
+  float radius;
+
+  // 材質のインデックス
+  int materialIndex;
+};
+
+// 球のデータ
+layout(std430, binding = 0) readonly buffer Spheres
+{
+  Sphere sphere[];
+};
+
+// 球のデータの数
+uniform int sphereCount = 1;
+
+//
+// 点 p を通り方向ベクトルが v の線分と, 球 s との交差判定
+//   ・交差していれば交点までの距離を返す
+//   ・交差していなければ -1 を返す
+//
+float intersection(in Sphere s, in vec3 p, in vec3 v)
+{
+  vec3 f = p - s.center;
+  float a = dot(v, v);
+  float b = dot(f, v);
+  float c = dot(f, f) - s.radius * s.radius;
+  float d = b * b - a * c;
+  return d < 0.0 ? -1.0 : (-b - sqrt(d)) / a;
+}
+
+void main()
+{
+  // ワークグループ ID をそのまま画素のインデックスに使う
+  const ivec2 xy = ivec2(gl_WorkGroupID);
+
+  // 視点から画素に向かうベクトルを求める
+  const vec2 st = (vec2(xy) - center) / center.y;
+  const vec3 direction = origin + right * st.s + up * st.t - position;
+
+  // 最小距離
+  float tmin = 3.402823466e+38;
+
+  // 交点を持つ球のデータの番号
+  int hit = -1;
+
+  // 全ての球のデータについて
+  for (int i = 0; i < sphereCount; ++i)
+  {
+    // 交点までの距離を求める
+    float t = intersection(sphere[i], position, direction);
+
+    // 交差していなければ次の球へ
+    if (t < 0.0) continue;
+
+    // 交差している球の中で最も近いものを選ぶ
+    if (t < tmin)
+    {
+      tmin = t;
+      hit = i;
+    }
+  }
+
+  // 交差していなければ背景色を設定
+  if (hit < 0)
+  {
+    imageStore(image, xy, background);
+    return;
+  }
+
+  // 交点の位置
+  vec3 p = position + tmin * direction;
+
+  // 交点の法線単位ベクトル
+  vec3 n = normalize(p - sphere[hit].center);
+
+  // 視線単位ベクトル
+  vec3 v = normalize(direction);
+
+  // 材質のインデックス
+  int mat = sphere[hit].materialIndex;
+
+  // 反射光強度
+  vec4 intensity = vec4(0.0);
+
+  for (int i = 0; i < lightCount; ++i)
+  {
+    // 交点から見た光源単位ベクトル
+    vec3 l = normalize(light[i].position - p);
+
+    // 中間ベクトル (視線ベクトル v の向きが反対なので)
+    vec3 h = normalize(l - v);
+
+    // 陰影計算
+    vec4 ambient = material[mat].ambient * light[i].ambient;
+    vec4 diffuse = max(dot(n, l), 0.0) * material[mat].diffuse * light[i].diffuse;
+    vec4 specular = pow(max(dot(n, h), 0.0), material[mat].shininess) * material[mat].specular * light[i].specular;
+
+    // 反射光強度の合計
+    intensity += ambient + diffuse + specular;
+  }
+
+  // 画素に書き込む
+  imageStore(image, xy, intensity);
+}
